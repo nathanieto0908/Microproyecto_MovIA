@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 import optuna
+import mlflow
+import mlflow.xgboost
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, precision_score, recall_score,
@@ -17,6 +19,9 @@ from src.config import *
 
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+#mlflow.set_tracking_uri("http://0.0.0.0:5000")
+experiment = mlflow.set_experiment("MovIA-XGBoost-Recommender")
 
 W = 70
 
@@ -155,164 +160,194 @@ def main():
     print(f"  scale_pos_weight: {spw:.2f}")
 
     sec("6. OPTUNA + STRATIFIED 5-FOLD CV", "-")
-
-    def objective(trial):
-        p = dict(
-            max_depth=trial.suggest_int("max_depth", 3, 8),
-            learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            n_estimators=1500,
-            subsample=trial.suggest_float("subsample", 0.6, 1.0),
-            colsample_bytree=trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            reg_alpha=trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
-            reg_lambda=trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
-            min_child_weight=trial.suggest_int("min_child_weight", 1, 15),
-            gamma=trial.suggest_float("gamma", 0.0, 5.0),
-            scale_pos_weight=spw,
-            objective="binary:logistic",
-            eval_metric="auc",
-            tree_method="hist",
-            random_state=RANDOM_STATE,
-            n_jobs=-1,
-            early_stopping_rounds=30,
-        )
+    with mlflow.start_run(experiment_id=experiment.experiment_id):
+        def objective(trial):
+            p = dict(
+                max_depth=trial.suggest_int("max_depth", 3, 8),
+                learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+                n_estimators=1500,
+                subsample=trial.suggest_float("subsample", 0.6, 1.0),
+                colsample_bytree=trial.suggest_float("colsample_bytree", 0.6, 1.0),
+                reg_alpha=trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+                reg_lambda=trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+                min_child_weight=trial.suggest_int("min_child_weight", 1, 15),
+                gamma=trial.suggest_float("gamma", 0.0, 5.0),
+                scale_pos_weight=spw,
+                objective="binary:logistic",
+                eval_metric="auc",
+                tree_method="hist",
+                random_state=RANDOM_STATE,
+                n_jobs=-1,
+                early_stopping_rounds=30,
+            )
+            skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+            aucs = []
+            for ti, vi in skf.split(Xtr, y_tr):
+                m = xgb.XGBClassifier(**p)
+                m.fit(Xtr[ti], y_tr[ti], eval_set=[(Xtr[vi], y_tr[vi])], verbose=False)
+                aucs.append(roc_auc_score(y_tr[vi], m.predict_proba(Xtr[vi])[:, 1]))
+            ma = np.mean(aucs); sa = np.std(aucs)
+            print(f"  Trial {trial.number+1:3d}/{OPTUNA_TRIALS}  "
+                  f"AUC={ma:.4f}+/-{sa:.4f}  d={p['max_depth']} "
+                  f"lr={p['learning_rate']:.4f} sub={p['subsample']:.2f}")
+            return ma
+    
+        study = optuna.create_study(direction="maximize",
+                                    sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE))
+        study.optimize(objective, n_trials=OPTUNA_TRIALS)
+    
+        bp = study.best_params
+        print(f"\n  Mejores params (CV AUC={study.best_value:.4f}):")
+        for k, v in bp.items():
+            print(f"    {k}: {v}")
+            mlflow.log_param(k, v)
+        mlflow.log_param("n_folds", N_FOLDS)
+        mlflow.log_param("optuna_trials", OPTUNA_TRIALS)
+        mlflow.log_param("target_threshold", TARGET_THRESHOLD)
+        mlflow.log_param("neg_per_user", NEG_PER_USER)
+    
+        sec("7. K-FOLD CV CON MEJORES HIPERPARAMETROS", "-")
+        fhp = dict(**bp, n_estimators=2000, scale_pos_weight=spw,
+                   objective="binary:logistic", eval_metric="auc",
+                   tree_method="hist", random_state=RANDOM_STATE,
+                   n_jobs=-1, early_stopping_rounds=50)
+    
         skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-        aucs = []
-        for ti, vi in skf.split(Xtr, y_tr):
-            m = xgb.XGBClassifier(**p)
-            m.fit(Xtr[ti], y_tr[ti], eval_set=[(Xtr[vi], y_tr[vi])], verbose=False)
-            aucs.append(roc_auc_score(y_tr[vi], m.predict_proba(Xtr[vi])[:, 1]))
-        ma = np.mean(aucs); sa = np.std(aucs)
-        print(f"  Trial {trial.number+1:3d}/{OPTUNA_TRIALS}  "
-              f"AUC={ma:.4f}+/-{sa:.4f}  d={p['max_depth']} "
-              f"lr={p['learning_rate']:.4f} sub={p['subsample']:.2f}")
-        return ma
+        frows = []
+        for fold, (ti, vi) in enumerate(skf.split(Xtr, y_tr)):
+            mdl = xgb.XGBClassifier(**fhp)
+            mdl.fit(Xtr[ti], y_tr[ti], eval_set=[(Xtr[vi], y_tr[vi])], verbose=False)
+            atr = roc_auc_score(y_tr[ti], mdl.predict_proba(Xtr[ti])[:, 1])
+            ava = roc_auc_score(y_tr[vi], mdl.predict_proba(Xtr[vi])[:, 1])
+            llv = log_loss(y_tr[vi], mdl.predict_proba(Xtr[vi])[:, 1])
+            frows.append(dict(fold=fold+1, auc_tr=atr, auc_va=ava,
+                              ll=llv, gap=atr-ava, it=mdl.best_iteration))
+            print(f"  Fold {fold+1}: AUC_tr={atr:.4f}  AUC_va={ava:.4f}  "
+                  f"Gap={atr-ava:+.4f}  LL={llv:.4f}  iter={mdl.best_iteration}")
+    
+        fdf = pd.DataFrame(frows)
+        print(f"\n  Resumen:")
+        print(f"  AUC Train: {fdf['auc_tr'].mean():.4f} +/- {fdf['auc_tr'].std():.4f}")
+        print(f"  AUC Val:   {fdf['auc_va'].mean():.4f} +/- {fdf['auc_va'].std():.4f}")
+        print(f"  LL Val:    {fdf['ll'].mean():.4f} +/- {fdf['ll'].std():.4f}")
+        print(f"  Gap:       {fdf['gap'].mean():.4f} +/- {fdf['gap'].std():.4f}")
+        gap_ok = fdf["gap"].mean() < 0.05
+        print(f"  {'OK' if gap_ok else 'WARN'}: Gap {'< 5%' if gap_ok else '>= 5%'}")
+    
+        sec("8. MODELO FINAL", "-")
+        final_model = xgb.XGBClassifier(**fhp)
+        t1 = time.time()
+        final_model.fit(Xtr, y_tr, eval_set=[(Xva, y_va)], verbose=False)
+        print(f"  Tiempo: {time.time()-t1:.1f}s")
+        print(f"  Mejor iter: {final_model.best_iteration} / {fhp['n_estimators']}")
+    
+        sec("9. EVALUACION FINAL", "-")
+        mtr = eval_cls(final_model, Xtr, y_tr, "TRAIN")
+        mva = eval_cls(final_model, Xva, y_va, "VALIDATION")
+        mte = eval_cls(final_model, Xte, y_te, "TEST")
+    
+        g1 = mtr["auc_roc"] - mva["auc_roc"]
+        g2 = mtr["auc_roc"] - mte["auc_roc"]
+        g3 = mva["auc_roc"] - mte["auc_roc"]
+        print(f"\n   AUC Train-Val:  {g1:+.4f}  {'OK' if abs(g1)<0.05 else 'WARN'}")
+        print(f"   AUC Train-Test: {g2:+.4f}  {'OK' if abs(g2)<0.05 else 'WARN'}")
+        print(f"   AUC Val-Test:   {g3:+.4f}  {'OK' if abs(g3)<0.03 else 'WARN'}")
 
-    study = optuna.create_study(direction="maximize",
-                                sampler=optuna.samplers.TPESampler(seed=RANDOM_STATE))
-    study.optimize(objective, n_trials=OPTUNA_TRIALS)
+        # Métricas de cada split
+        for split_name, metrics in [("train", mtr), ("val", mva), ("test", mte)]:
+            for metric_name, value in metrics.items():
+                mlflow.log_metric(f"{split_name}_{metric_name}", value)
+    
+        # Gap de generalización
+        mlflow.log_metric("gap_train_val", g1)
+        mlflow.log_metric("gap_train_test", g2)
+        mlflow.log_metric("gap_val_test", g3)
+        
+        # CV summary
+        mlflow.log_metric("cv_auc_mean", fdf['auc_va'].mean())
+        mlflow.log_metric("cv_auc_std", fdf['auc_va'].std())
+        mlflow.log_metric("best_cv_auc", study.best_value)
+        
+        ytp = (final_model.predict_proba(Xte)[:, 1] >= 0.5).astype(int)
+        cm = confusion_matrix(y_te.astype(int), ytp)
+        print(f"\n  Confusion Matrix (Test):")
+        print(f"                  Pred-  Pred+")
+        print(f"  Actual-     {cm[0,0]:>8,}{cm[0,1]:>8,}")
+        print(f"  Actual+     {cm[1,0]:>8,}{cm[1,1]:>8,}")
+        print(f"\n{classification_report(y_te.astype(int), ytp, target_names=['No gusto','Gusto'], digits=4)}")
+    
+        print(f"  TOP 20 FEATURES")
+        imp = final_model.feature_importances_
+        pairs = sorted(zip(feat_names, imp), key=lambda x: -x[1])
+        mx = pairs[0][1] if pairs[0][1] > 0 else 1
+        for i, (nm, v) in enumerate(pairs[:20]):
+            print(f"   {i+1:2d}. {nm:<32s} {v:.4f}  {'#'*int(v/mx*25)}")
+    
+        sec("10. GUARDANDO ARTEFACTOS", "-")
+        art = Path(ARTIFACTS_DIR)
+    
+        md = art / "model"; md.mkdir(parents=True, exist_ok=True)
+        mp = md / "xgboost_recommender.ubj"
+        final_model.save_model(str(mp))
+        print(f"  Modelo:      {mp}")
 
-    bp = study.best_params
-    print(f"\n  Mejores params (CV AUC={study.best_value:.4f}):")
-    for k, v in bp.items():
-        print(f"    {k}: {v}")
+        td = art / "transformers"
+        transformer.save(td)
+        print(f"  Transformer: {td}")
+    
+        mtd = art / "metadata"; mtd.mkdir(parents=True, exist_ok=True)
+        meta = dict(
+            training_date=time.strftime("%Y-%m-%d %H:%M:%S"),
+            model_type="XGBClassifier",
+            dataset_total=len(df_full), dataset_rated=len(df_rated),
+            neg_per_user=NEG_PER_USER,
+            train_size=len(X_tr), val_size=len(X_va), test_size=len(X_te),
+            n_features=len(feat_names), feature_names=feat_names,
+            best_hyperparams=bp, best_cv_auc=study.best_value,
+            metrics=dict(train=mtr, validation=mva, test=mte),
+            kfold_results=frows,
+            config=dict(n_folds=N_FOLDS, optuna_trials=OPTUNA_TRIALS,
+                        target_threshold=TARGET_THRESHOLD, random_state=RANDOM_STATE),
+        )
+        with open(mtd / "training_metadata.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, default=str, ensure_ascii=False)
+        print(f"  Metadata:    {mtd / 'training_metadata.json'}")
+    
+        with open(mtd / "feature_names.json", "w") as f:
+            json.dump(feat_names, f, indent=2)
+        print(f"  Features:    {mtd / 'feature_names.json'}")
 
-    sec("7. K-FOLD CV CON MEJORES HIPERPARAMETROS", "-")
-    fhp = dict(**bp, n_estimators=2000, scale_pos_weight=spw,
-               objective="binary:logistic", eval_metric="auc",
-               tree_method="hist", random_state=RANDOM_STATE,
-               n_jobs=-1, early_stopping_rounds=50)
+        mlflow.xgboost.log_model(final_model, "xgboost_recommender")
 
-    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=RANDOM_STATE)
-    frows = []
-    for fold, (ti, vi) in enumerate(skf.split(Xtr, y_tr)):
-        mdl = xgb.XGBClassifier(**fhp)
-        mdl.fit(Xtr[ti], y_tr[ti], eval_set=[(Xtr[vi], y_tr[vi])], verbose=False)
-        atr = roc_auc_score(y_tr[ti], mdl.predict_proba(Xtr[ti])[:, 1])
-        ava = roc_auc_score(y_tr[vi], mdl.predict_proba(Xtr[vi])[:, 1])
-        llv = log_loss(y_tr[vi], mdl.predict_proba(Xtr[vi])[:, 1])
-        frows.append(dict(fold=fold+1, auc_tr=atr, auc_va=ava,
-                          ll=llv, gap=atr-ava, it=mdl.best_iteration))
-        print(f"  Fold {fold+1}: AUC_tr={atr:.4f}  AUC_va={ava:.4f}  "
-              f"Gap={atr-ava:+.4f}  LL={llv:.4f}  iter={mdl.best_iteration}")
-
-    fdf = pd.DataFrame(frows)
-    print(f"\n  Resumen:")
-    print(f"  AUC Train: {fdf['auc_tr'].mean():.4f} +/- {fdf['auc_tr'].std():.4f}")
-    print(f"  AUC Val:   {fdf['auc_va'].mean():.4f} +/- {fdf['auc_va'].std():.4f}")
-    print(f"  LL Val:    {fdf['ll'].mean():.4f} +/- {fdf['ll'].std():.4f}")
-    print(f"  Gap:       {fdf['gap'].mean():.4f} +/- {fdf['gap'].std():.4f}")
-    gap_ok = fdf["gap"].mean() < 0.05
-    print(f"  {'OK' if gap_ok else 'WARN'}: Gap {'< 5%' if gap_ok else '>= 5%'}")
-
-    sec("8. MODELO FINAL", "-")
-    final_model = xgb.XGBClassifier(**fhp)
-    t1 = time.time()
-    final_model.fit(Xtr, y_tr, eval_set=[(Xva, y_va)], verbose=False)
-    print(f"  Tiempo: {time.time()-t1:.1f}s")
-    print(f"  Mejor iter: {final_model.best_iteration} / {fhp['n_estimators']}")
-
-    sec("9. EVALUACION FINAL", "-")
-    mtr = eval_cls(final_model, Xtr, y_tr, "TRAIN")
-    mva = eval_cls(final_model, Xva, y_va, "VALIDATION")
-    mte = eval_cls(final_model, Xte, y_te, "TEST")
-
-    g1 = mtr["auc_roc"] - mva["auc_roc"]
-    g2 = mtr["auc_roc"] - mte["auc_roc"]
-    g3 = mva["auc_roc"] - mte["auc_roc"]
-    print(f"\n   AUC Train-Val:  {g1:+.4f}  {'OK' if abs(g1)<0.05 else 'WARN'}")
-    print(f"   AUC Train-Test: {g2:+.4f}  {'OK' if abs(g2)<0.05 else 'WARN'}")
-    print(f"   AUC Val-Test:   {g3:+.4f}  {'OK' if abs(g3)<0.03 else 'WARN'}")
-
-    ytp = (final_model.predict_proba(Xte)[:, 1] >= 0.5).astype(int)
-    cm = confusion_matrix(y_te.astype(int), ytp)
-    print(f"\n  Confusion Matrix (Test):")
-    print(f"                  Pred-  Pred+")
-    print(f"  Actual-     {cm[0,0]:>8,}{cm[0,1]:>8,}")
-    print(f"  Actual+     {cm[1,0]:>8,}{cm[1,1]:>8,}")
-    print(f"\n{classification_report(y_te.astype(int), ytp, target_names=['No gusto','Gusto'], digits=4)}")
-
-    print(f"  TOP 20 FEATURES")
-    imp = final_model.feature_importances_
-    pairs = sorted(zip(feat_names, imp), key=lambda x: -x[1])
-    mx = pairs[0][1] if pairs[0][1] > 0 else 1
-    for i, (nm, v) in enumerate(pairs[:20]):
-        print(f"   {i+1:2d}. {nm:<32s} {v:.4f}  {'#'*int(v/mx*25)}")
-
-    sec("10. GUARDANDO ARTEFACTOS", "-")
-    art = Path(ARTIFACTS_DIR)
-
-    md = art / "model"; md.mkdir(parents=True, exist_ok=True)
-    mp = md / "xgboost_recommender.ubj"
-    final_model.save_model(str(mp))
-    print(f"  Modelo:      {mp}")
-
-    td = art / "transformers"
-    transformer.save(td)
-    print(f"  Transformer: {td}")
-
-    mtd = art / "metadata"; mtd.mkdir(parents=True, exist_ok=True)
-    meta = dict(
-        training_date=time.strftime("%Y-%m-%d %H:%M:%S"),
-        model_type="XGBClassifier",
-        dataset_total=len(df_full), dataset_rated=len(df_rated),
-        neg_per_user=NEG_PER_USER,
-        train_size=len(X_tr), val_size=len(X_va), test_size=len(X_te),
-        n_features=len(feat_names), feature_names=feat_names,
-        best_hyperparams=bp, best_cv_auc=study.best_value,
-        metrics=dict(train=mtr, validation=mva, test=mte),
-        kfold_results=frows,
-        config=dict(n_folds=N_FOLDS, optuna_trials=OPTUNA_TRIALS,
-                    target_threshold=TARGET_THRESHOLD, random_state=RANDOM_STATE),
-    )
-    with open(mtd / "training_metadata.json", "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2, default=str, ensure_ascii=False)
-    print(f"  Metadata:    {mtd / 'training_metadata.json'}")
-
-    with open(mtd / "feature_names.json", "w") as f:
-        json.dump(feat_names, f, indent=2)
-    print(f"  Features:    {mtd / 'feature_names.json'}")
-
-    sec("11. DEMO", "-")
-    pop = transformer.movie_catalog.nlargest(200, "log_popularity")
-    seeds = pop.sample(5, random_state=42).index.tolist()
-    print("  Semillas:")
-    for mid in seeds:
-        r = transformer.movie_catalog.loc[mid]
-        print(f"    [{mid}] {r['title']}  ({r['genres_raw']})")
-
-    Xc, ci = transformer.prepare_inference(seeds, top_n_candidates=500)
-    if len(Xc) > 0:
-        Xcn = np.nan_to_num(Xc.values.astype(np.float32), nan=0.0)
-        probs = final_model.predict_proba(Xcn)[:, 1]
-        ci["probability"] = probs
-        top3 = ci.nlargest(3, "probability")
-        print(f"\n  TOP 3 RECOMENDACIONES:")
-        for _, r in top3.iterrows():
-            print(f"    [{r['movie_id']}] {r['title']}  {r['probability']*100:.1f}%")
-
-    elapsed = time.time() - t0
-    sec(f"COMPLETADO en {elapsed/60:.1f} minutos")
-
+        # Artefactos adicionales
+        mlflow.log_artifact(str(mp))                          
+        mlflow.log_artifact(str(mtd / "training_metadata.json"))
+        mlflow.log_artifact(str(mtd / "feature_names.json"))
+        mlflow.log_param("n_features", len(feat_names))
+        mlflow.log_param("best_iteration", final_model.best_iteration)
+        
+        sec("11. DEMO", "-")
+        pop = transformer.movie_catalog.nlargest(200, "log_popularity")
+        seeds = pop.sample(5, random_state=42).index.tolist()
+        print("  Semillas:")
+        for mid in seeds:
+            r = transformer.movie_catalog.loc[mid]
+            print(f"    [{mid}] {r['title']}  ({r['genres_raw']})")
+    
+        Xc, ci = transformer.prepare_inference(seeds, top_n_candidates=500)
+        if len(Xc) > 0:
+            Xcn = np.nan_to_num(Xc.values.astype(np.float32), nan=0.0)
+            probs = final_model.predict_proba(Xcn)[:, 1]
+            ci["probability"] = probs
+            top3 = ci.nlargest(3, "probability")
+            print(f"\n  TOP 3 RECOMENDACIONES:")
+            for _, r in top3.iterrows():
+                print(f"    [{r['movie_id']}] {r['title']}  {r['probability']*100:.1f}%")
+    
+        elapsed = time.time() - t0
+        mlflow.log_metric("training_minutes", elapsed / 60)
+        sec(f"COMPLETADO en {elapsed/60:.1f} minutos")
+    
 
 if __name__ == "__main__":
     main()
