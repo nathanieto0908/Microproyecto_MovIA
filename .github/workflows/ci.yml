@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: back
+        working-directory: model/back
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: front
+        working-directory: model/front
     steps:
       - uses: actions/checkout@v4
 
