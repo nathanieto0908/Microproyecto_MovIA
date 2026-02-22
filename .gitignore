@@ -25,3 +25,4 @@ venv/
 .DS_Store
 Thumbs.db
 >>>>>>> cd51d95 (Squashed 'modelo/' content from commit 3a89cb4)
+/model
