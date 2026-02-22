@@ -1,0 +1,56 @@
+name: Deploy to EC2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
+            echo "::error::Missing secret EC2_SSH_KEY"; exit 1
+          fi
+          if [ -z "${{ vars.EC2_HOST }}" ]; then
+            echo "::error::Missing variable EC2_HOST"; exit 1
+          fi
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ vars.EC2_HOST }}
+          username: ${{ vars.EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            REPO_DIR="${{ vars.DEPLOY_DIR || '~/movia' }}"
+
+            # Clone or pull
+            if [ ! -d "$REPO_DIR" ]; then
+              git clone ${{ github.server_url }}/${{ github.repository }}.git "$REPO_DIR"
+            fi
+
+            cd "$REPO_DIR"
+            git fetch origin
+            git reset --hard origin/${{ github.ref_name }}
+
+            # Build and restart
+            docker compose down --remove-orphans || true
+            docker compose build --no-cache
+            docker compose up -d
+
+            # Wait for health check
+            echo "Waiting for backend health..."
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost/health > /dev/null 2>&1; then
+                echo "Healthy!"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "::warning::Health check timed out"

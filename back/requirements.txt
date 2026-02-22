@@ -1,0 +1,21 @@
+# Data & ML
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+xgboost>=2.0
+optuna>=3.4
+joblib>=1.3
+pyarrow>=14.0
+
+# API
+fastapi>=0.104
+uvicorn[standard]>=0.24
+pydantic>=2.5
+requests>=2.31
+
+# Utils
+python-dotenv>=1.0
+
+# Dev/Testing
+pytest>=7.4
+httpx>=0.25

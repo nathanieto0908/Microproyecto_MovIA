@@ -1,4 +1,27 @@
+<<<<<<< HEAD
 
 /data/*
 !data/*.dvc
 
+=======
+# Python
+*.pyo
+*.pyd
+
+# Env
+.env
+.venv/
+venv/
+
+# Data
+*.csv
+
+# Models
+*.pkl
+*.h5
+*.pt
+
+# OS
+.DS_Store
+Thumbs.db
+>>>>>>> cd51d95 (Squashed 'modelo/' content from commit 3a89cb4)
