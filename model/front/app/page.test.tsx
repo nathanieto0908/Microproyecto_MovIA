@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { delay, http, HttpResponse } from "msw"
+import { http, HttpResponse } from "msw"
 import Home from "@/app/page"
 import { DUMMY_MOVIE_CATALOG } from "@/tests/fixtures/movie-catalog"
 import { server } from "@/tests/mocks/server"
@@ -19,13 +19,13 @@ async function goToSelectionStep() {
   const user = userEvent.setup()
   render(<Home />)
   await user.click(screen.getByRole("button", { name: /comenzar/i }))
-  // El catalogo es local, asi que las peliculas aparecen de inmediato
+  // Esperar a que carguen las peliculas desde la API (mock)
   await screen.findByText(/^inception$/i)
   return user
 }
 
 async function selectFiveMovies(user: ReturnType<typeof userEvent.setup>) {
-  // Usar peliculas que existen en el catalogo local con IDs reales de TMDb
+  // Usar peliculas que existen en DUMMY_MOVIE_CATALOG (el mock de la API)
   await user.click(getMovieCardButtonByTitle("Inception"))
   await user.click(getMovieCardButtonByTitle("The Matrix"))
   await user.click(getMovieCardButtonByTitle("Parasite"))
@@ -74,27 +74,48 @@ describe("Home page flow", () => {
     })
   })
 
-  it("muestra las 35 peliculas del catalogo al entrar a seleccion", async () => {
+  it("muestra las peliculas del catalogo de la API al entrar a seleccion", async () => {
     await goToSelectionStep()
 
-    // Verificar que varias peliculas del catalogo estan visibles
+    // Verificar peliculas del DUMMY_MOVIE_CATALOG (cargadas via API mock)
     expect(screen.getByText(/^inception$/i)).toBeInTheDocument()
     expect(screen.getByText(/^the matrix$/i)).toBeInTheDocument()
     expect(screen.getByText(/^the godfather$/i)).toBeInTheDocument()
-    expect(screen.getByText(/^logan$/i)).toBeInTheDocument()
+    expect(screen.getByText(/^dune$/i)).toBeInTheDocument()
   })
 
-  it("busqueda local filtra peliculas", async () => {
+  it("busqueda filtra peliculas via API", async () => {
     const user = await goToSelectionStep()
 
     const searchInput = screen.getByPlaceholderText(/buscar/i)
     await user.type(searchInput, "matrix")
 
-    // Esperar debounce + filtrado
+    // Esperar debounce + busqueda API
     await waitFor(() => {
       expect(screen.getByText(/^the matrix$/i)).toBeInTheDocument()
       // Inception no deberia estar visible
       expect(screen.queryByText(/^inception$/i)).not.toBeInTheDocument()
     })
+  })
+
+  it("usa catalogo local como fallback si la API no esta disponible", async () => {
+    // Forzar que la API falle para el catalogo
+    server.use(
+      http.get("https://api.test.local/movies", async () => {
+        return HttpResponse.json(
+          { message: "Backend no disponible" },
+          { status: 503 },
+        )
+      }),
+    )
+
+    const user = userEvent.setup()
+    render(<Home />)
+    await user.click(screen.getByRole("button", { name: /comenzar/i }))
+
+    // Debe caer al catalogo local estatico
+    await screen.findByText(/^inception$/i)
+    expect(screen.getByText(/^the godfather$/i)).toBeInTheDocument()
+    expect(screen.getByText(/^logan$/i)).toBeInTheDocument()
   })
 })

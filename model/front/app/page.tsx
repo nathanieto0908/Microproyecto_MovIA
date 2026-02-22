@@ -8,20 +8,23 @@ import { MovieCard } from "@/components/movie-card"
 import { SelectionTracker } from "@/components/selection-tracker"
 import { ConfirmationModal } from "@/components/confirmation-modal"
 import { Recommendations } from "@/components/recommendations"
-import { getRecommendations as requestRecommendations } from "@/lib/api/endpoints"
+import {
+  getMovies,
+  searchMovies as apiSearchMovies,
+  getRecommendations as requestRecommendations,
+} from "@/lib/api/endpoints"
 import {
   MOVIE_CATALOG,
   MOVIE_BY_ID,
-  ALL_GENRES,
   searchCatalog,
   filterByGenre,
   getLocalRecommendations,
 } from "@/lib/data/movie-catalog"
 import type { Movie, Recommendation } from "@/lib/types"
-import { Film } from "lucide-react"
+import { Film, Loader2 } from "lucide-react"
 
 type Step = "welcome" | "selection" | "results"
-const SEARCH_DEBOUNCE_MS = 150
+const SEARCH_DEBOUNCE_MS = 300
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
@@ -42,7 +45,39 @@ export default function Home() {
   const [debouncedSearch, setDebouncedSearch] = useState("")
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Debounce de busqueda local
+  // API state
+  const [apiMovies, setApiMovies] = useState<Movie[]>([])
+  const [backendAvailable, setBackendAvailable] = useState(false)
+  const [isLoadingMovies, setIsLoadingMovies] = useState(true)
+  const [isSearching, setIsSearching] = useState(false)
+  const [totalMovies, setTotalMovies] = useState(0)
+  const fetchIdRef = useRef(0)
+
+  // Load movies from backend on mount
+  useEffect(() => {
+    let cancelled = false
+    setIsLoadingMovies(true)
+
+    getMovies({ page: 1, pageSize: 60 })
+      .then((page) => {
+        if (cancelled) return
+        setApiMovies(page.items)
+        setTotalMovies(page.total)
+        setBackendAvailable(true)
+      })
+      .catch(() => {
+        if (!cancelled) setBackendAvailable(false)
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingMovies(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Debounce search
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => {
@@ -53,11 +88,65 @@ export default function Home() {
     }
   }, [search])
 
-  // Filtrar peliculas del catalogo local
+  // Fetch from backend when search changes (API mode)
+  useEffect(() => {
+    if (!backendAvailable) return
+
+    const currentId = ++fetchIdRef.current
+    const q = debouncedSearch.trim()
+
+    if (!q) {
+      // Reset to full catalog from API
+      setIsSearching(true)
+      getMovies({ page: 1, pageSize: 60 })
+        .then((page) => {
+          if (currentId === fetchIdRef.current) {
+            setApiMovies(page.items)
+            setTotalMovies(page.total)
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (currentId === fetchIdRef.current) setIsSearching(false)
+        })
+      return
+    }
+
+    setIsSearching(true)
+    apiSearchMovies(q, { pageSize: 60 })
+      .then((results) => {
+        if (currentId === fetchIdRef.current) {
+          setApiMovies(results)
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (currentId === fetchIdRef.current) setIsSearching(false)
+      })
+  }, [debouncedSearch, backendAvailable])
+
+  // Compute displayed movies
+  const movies = useMemo(() => {
+    if (backendAvailable) return apiMovies
+    return MOVIE_CATALOG
+  }, [backendAvailable, apiMovies])
+
+  // Compute genres from current movies
+  const allGenres = useMemo(() => {
+    return Array.from(new Set(movies.flatMap((m) => m.genres))).sort()
+  }, [movies])
+
+  // Filter by search (local only when backend unavailable) and genre
   const filtered = useMemo(() => {
-    const bySearch = searchCatalog(debouncedSearch)
-    return filterByGenre(bySearch, activeGenre)
-  }, [debouncedSearch, activeGenre])
+    let result = movies
+
+    // Local search only when backend is not available
+    if (!backendAvailable && debouncedSearch.trim()) {
+      result = searchCatalog(debouncedSearch)
+    }
+
+    return filterByGenre(result, activeGenre)
+  }, [movies, debouncedSearch, backendAvailable, activeGenre])
 
   const toggleMovie = (movie: Movie) => {
     setSelected((prev) => {
@@ -82,21 +171,24 @@ export default function Home() {
     setRecommendError(null)
 
     try {
-      // Intentar obtener recomendaciones del backend (modelo ML)
       const recs = await requestRecommendations(
         selected.map((movie) => movie.id),
-        MOVIE_CATALOG,
+        movies,
       )
 
       if (recs.length === 0) {
         throw new Error("El backend no devolvio recomendaciones.")
       }
 
-      // Enriquecer con posters del catalogo local
+      // Enrich with poster from known movies
+      const knownMovies = new Map([
+        ...MOVIE_CATALOG.map((m) => [m.id, m] as const),
+        ...movies.map((m) => [m.id, m] as const),
+      ])
       const enriched = recs.map((rec) => {
-        const localMovie = MOVIE_BY_ID.get(rec.movie.id)
-        if (localMovie && (!rec.movie.poster || rec.movie.poster === "/placeholder.svg")) {
-          return { ...rec, movie: { ...rec.movie, poster: localMovie.poster } }
+        const known = knownMovies.get(rec.movie.id)
+        if (known && (!rec.movie.poster || rec.movie.poster === "/placeholder.svg")) {
+          return { ...rec, movie: { ...rec.movie, poster: known.poster } }
         }
         return rec
       })
@@ -105,7 +197,6 @@ export default function Home() {
       setShowConfirmation(false)
       setStep("results")
     } catch (error) {
-      // Fallback: recomendacion local basada en generos
       console.warn("Backend no disponible, usando recomendacion local:", error)
       const localRecs = getLocalRecommendations(selected)
       if (localRecs.length > 0) {
@@ -168,7 +259,7 @@ export default function Home() {
             <SearchBar
               value={search}
               onChange={setSearch}
-              isLoading={false}
+              isLoading={isSearching}
               disabled={false}
             />
 
@@ -183,7 +274,7 @@ export default function Home() {
               >
                 Todas
               </button>
-              {ALL_GENRES.map((genre) => (
+              {allGenres.map((genre) => (
                 <button
                   key={genre}
                   onClick={() => setActiveGenre(genre === activeGenre ? null : genre)}
@@ -205,8 +296,23 @@ export default function Home() {
             </div>
           )}
 
+          {/* Catalog info */}
+          {backendAvailable && !isLoadingMovies && (
+            <p className="text-xs text-muted-foreground">
+              Mostrando {filtered.length} de {totalMovies.toLocaleString()} peliculas del catalogo
+            </p>
+          )}
+
+          {/* Loading state */}
+          {isLoadingMovies && (
+            <div className="flex flex-col items-center justify-center py-16 gap-3">
+              <Loader2 className="w-8 h-8 animate-spin text-primary" />
+              <p className="text-sm text-muted-foreground">Cargando catalogo de peliculas...</p>
+            </div>
+          )}
+
           {/* Movie grid */}
-          {filtered.length > 0 ? (
+          {!isLoadingMovies && filtered.length > 0 && (
             <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-3">
               {filtered.map((movie) => (
                 <MovieCard
@@ -218,7 +324,10 @@ export default function Home() {
                 />
               ))}
             </div>
-          ) : (
+          )}
+
+          {/* Empty state */}
+          {!isLoadingMovies && filtered.length === 0 && (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
               <Film className="w-10 h-10 text-muted-foreground/50" />
               <p className="text-sm text-muted-foreground">

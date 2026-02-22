@@ -29,8 +29,7 @@ function paginate<T>(items: T[], page: number, pageSize: number) {
 }
 
 export const handlers = [
-  // El catalogo ya es local, pero mantenemos estos endpoints por si algun
-  // test legacy los necesita
+  // Catalogo de peliculas (usado por la pagina principal)
   http.get(`${API_HOST}/movies`, async ({ request }) => {
     const { page, pageSize } = parsePagination(new URL(request.url))
     await delay(20)

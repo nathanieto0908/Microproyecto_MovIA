@@ -5,6 +5,7 @@ services:
       - "8000"
     environment:
       - ARTIFACTS_DIR=artifacts
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
