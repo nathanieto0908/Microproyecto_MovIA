@@ -2,6 +2,12 @@ import numpy as np
 import xgboost as xgb
 import json
 from pathlib import Path
+import joblib
+
+try:
+    import lightgbm as lgb
+except Exception:
+    lgb = None
 
 from src.feature_engineering import FeatureTransformer
 from app.tmdb_service import TMDbService
@@ -9,23 +15,62 @@ from app.tmdb_service import TMDbService
 
 class RecommenderEngine:
 
-    def __init__(self, artifacts_dir: str = "artifacts"):
+    def __init__(self, artifacts_dir: str = "artifacts", model_type: str = "xgboost"):
         self.artifacts_dir = Path(artifacts_dir)
+        self.model_type = (model_type or "xgboost").strip().lower()
         self.model = None
         self.transformer = None
         self.metadata = None
         self.tmdb = TMDbService(cache_dir=str(Path(artifacts_dir) / "cache"))
         self._loaded = False
 
+    def _resolve_model_path(self) -> Path:
+        model_dir = self.artifacts_dir / "model"
+        if self.model_type == "xgboost":
+            return model_dir / "xgboost_recommender.ubj"
+        if self.model_type == "lightgbm":
+            return model_dir / "lightgbm_recommender.txt"
+        if self.model_type == "random_forest":
+            return model_dir / "random_forest_recommender.joblib"
+        raise ValueError(
+            f"model_type invalido: {self.model_type}. Usa 'xgboost', 'lightgbm' o 'random_forest'."
+        )
+
+    def _resolve_metadata_path(self) -> Path:
+        md = self.artifacts_dir / "metadata"
+        if self.model_type == "lightgbm":
+            candidates = [md / "training_metadata_lightgbm.json", md / "training_metadata.json"]
+        elif self.model_type == "random_forest":
+            candidates = [md / "training_metadata_random_forest.json", md / "training_metadata.json"]
+        else:
+            candidates = [md / "training_metadata_xgboost.json", md / "training_metadata.json"]
+
+        for p in candidates:
+            if p.exists():
+                return p
+        raise FileNotFoundError(f"No se encontro metadata para model_type={self.model_type} en {md}")
+
     def load(self):
-        model_path = self.artifacts_dir / "model" / "xgboost_recommender.ubj"
-        self.model = xgb.XGBClassifier()
-        self.model.load_model(str(model_path))
+        model_path = self._resolve_model_path()
+        if not model_path.exists():
+            raise FileNotFoundError(f"No se encontro el artefacto del modelo: {model_path}")
+
+        if self.model_type == "xgboost":
+            self.model = xgb.XGBClassifier()
+            self.model.load_model(str(model_path))
+        elif self.model_type == "lightgbm":
+            if lgb is None:
+                raise RuntimeError(
+                    "lightgbm no esta instalado. Instala dependencias o usa MODEL_TYPE=xgboost."
+                )
+            self.model = lgb.Booster(model_file=str(model_path))
+        elif self.model_type == "random_forest":
+            self.model = joblib.load(model_path)
 
         trans_path = self.artifacts_dir / "transformers"
         self.transformer = FeatureTransformer.load(trans_path)
 
-        meta_path = self.artifacts_dir / "metadata" / "training_metadata.json"
+        meta_path = self._resolve_metadata_path()
         with open(meta_path, "r", encoding="utf-8") as f:
             self.metadata = json.load(f)
 
@@ -34,6 +79,18 @@ class RecommenderEngine:
     @property
     def is_loaded(self) -> bool:
         return self._loaded
+
+    def _predict_positive_proba(self, X_np: np.ndarray) -> np.ndarray:
+        if self.model_type == "xgboost":
+            return self.model.predict_proba(X_np)[:, 1]
+        if self.model_type == "random_forest":
+            return self.model.predict_proba(X_np)[:, 1]
+
+        probs = self.model.predict(X_np)
+        probs_np = np.asarray(probs, dtype=np.float32)
+        if probs_np.ndim == 2 and probs_np.shape[1] >= 2:
+            return probs_np[:, 1]
+        return probs_np.reshape(-1)
 
     def _movie_dict(self, mid: int, cat_row=None, include_popularity: bool = False) -> dict:
         if cat_row is None:
@@ -83,7 +140,7 @@ class RecommenderEngine:
             }
 
         X_np = np.nan_to_num(X_cand.values.astype(np.float32), nan=0.0)
-        probs = self.model.predict_proba(X_np)[:, 1]
+        probs = self._predict_positive_proba(X_np)
         cand_info = cand_info.copy()
         cand_info["probability"] = probs
 

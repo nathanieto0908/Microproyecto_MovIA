@@ -16,7 +16,8 @@ from app.schemas import (
 from app.recommender import RecommenderEngine
 
 ARTIFACTS_DIR = os.getenv("ARTIFACTS_DIR", "artifacts")
-engine = RecommenderEngine(artifacts_dir=ARTIFACTS_DIR)
+MODEL_TYPE = os.getenv("MODEL_TYPE", "xgboost")
+engine = RecommenderEngine(artifacts_dir=ARTIFACTS_DIR, model_type=MODEL_TYPE)
 
 
 @asynccontextmanager
@@ -24,7 +25,9 @@ async def lifespan(app: FastAPI):
     engine.load()
     catalog_size = len(engine.transformer.movie_catalog)
     tmdb_status = "configurado" if engine.tmdb.is_configured else "no configurado (set TMDB_API_KEY)"
-    print(f"Modelo cargado - Catalogo: {catalog_size:,} peliculas | TMDb: {tmdb_status}")
+    print(
+        f"Modelo cargado ({engine.model_type}) - Catalogo: {catalog_size:,} peliculas | TMDb: {tmdb_status}"
+    )
     yield
     engine.tmdb.flush_cache()
 
@@ -103,6 +106,7 @@ def model_info():
         raise HTTPException(status_code=503, detail="Modelo aun no cargado.")
     meta = engine.metadata
     return ModelInfoResponse(
+        model_type=meta.get("model_type", engine.model_type),
         training_date=meta.get("training_date", "unknown"),
         n_features=meta.get("n_features", 0),
         test_auc_roc=meta.get("metrics", {}).get("test", {}).get("auc_roc", 0),

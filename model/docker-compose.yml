@@ -5,6 +5,7 @@ services:
       - "8000"
     environment:
       - ARTIFACTS_DIR=artifacts
+      - MODEL_TYPE=${MODEL_TYPE:-xgboost}
       - TMDB_API_KEY=${TMDB_API_KEY:-}
     restart: unless-stopped
     healthcheck:

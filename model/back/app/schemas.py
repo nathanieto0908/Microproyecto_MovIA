@@ -58,6 +58,7 @@ class HealthResponse(BaseModel):
 
 
 class ModelInfoResponse(BaseModel):
+    model_type: str = "unknown"
     training_date: str
     n_features: int
     test_auc_roc: float
