@@ -25,5 +25,10 @@ venv/
 .DS_Store
 Thumbs.db
 >>>>>>> cd51d95 (Squashed 'modelo/' content from commit 3a89cb4)
+<<<<<<< HEAD
 *.pem
 *.csv
+=======
+/model
+/Manuales
+>>>>>>> 3d4f418 (Primera version de manuales)

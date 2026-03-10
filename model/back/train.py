@@ -20,7 +20,7 @@ from src.config import *
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-#mlflow.set_tracking_uri("http://0.0.0.0:5000")
+mlflow.set_tracking_uri("http://ec2-13-222-178-125.compute-1.amazonaws.com:8050")
 experiment = mlflow.set_experiment("MovIA-XGBoost-Recommender")
 
 W = 70
@@ -60,6 +60,7 @@ def main():
     sec("MovIA - ENTRENAMIENTO SUPERVISADO CON XGBOOST")
 
     sec("1. CARGA DE DATOS", "-")
+    DATA_PATH = "/home/ubuntu/dvc-proj/data/Train_Data.csv"
     df_full = pd.read_csv(DATA_PATH)
     print(f"  {len(df_full):,} filas | {df_full['user_id'].nunique():,} usuarios "
           f"| {df_full['movie_id'].nunique():,} peliculas")
@@ -163,9 +164,9 @@ def main():
     with mlflow.start_run(experiment_id=experiment.experiment_id):
         def objective(trial):
             p = dict(
-                max_depth=trial.suggest_int("max_depth", 3, 8),
-                learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-                n_estimators=1500,
+                max_depth=trial.suggest_int("max_depth", 5, 10),
+                learning_rate=trial.suggest_float("learning_rate", 0.1, 0.3, log=True),
+                n_estimators=2500,
                 subsample=trial.suggest_float("subsample", 0.6, 1.0),
                 colsample_bytree=trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 reg_alpha=trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
