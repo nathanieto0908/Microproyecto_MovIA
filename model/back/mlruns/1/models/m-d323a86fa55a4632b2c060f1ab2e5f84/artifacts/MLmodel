@@ -1,0 +1,22 @@
+artifact_path: /home/ubuntu/dvc-proj/model/back/mlruns/1/models/m-d323a86fa55a4632b2c060f1ab2e5f84/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.12.3
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBClassifier
+    model_format: ubj
+    xgb_version: 3.2.0
+mlflow_version: 3.10.0
+model_id: m-d323a86fa55a4632b2c060f1ab2e5f84
+model_size_bytes: 162503
+model_uuid: m-d323a86fa55a4632b2c060f1ab2e5f84
+prompts: null
+run_id: 907e782a107b449aa413d3c732e03add
+utc_time_created: '2026-02-22 15:08:22.724595'
